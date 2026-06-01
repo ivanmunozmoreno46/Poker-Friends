@@ -9,6 +9,7 @@ import { Copy, Check, Users, MessageSquare, LogOut, Code, Sparkles, HelpCircle, 
 
 import { RoomState, ChatMessage, ClientMessage, ServerMessage, Player } from './types';
 import PokerTable from './components/PokerTable';
+import { P2PManager } from './utils/p2p';
 import ControlPanel from './components/ControlPanel';
 import ChatPanel from './components/ChatPanel';
 import LobbyPanel from './components/LobbyPanel';
@@ -22,8 +23,13 @@ import {
 } from './utils/audio';
 
 export default function App() {
-  const [socket, setSocket] = useState<WebSocket | null>(null);
-  const [playerId, setPlayerId] = useState<string>('');
+  const [playerId] = useState<string>(() => {
+    const existing = localStorage.getItem('poker_p2p_player_id');
+    if (existing) return existing;
+    const fresh = Math.random().toString(36).substring(2, 9);
+    localStorage.setItem('poker_p2p_player_id', fresh);
+    return fresh;
+  });
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -31,165 +37,117 @@ export default function App() {
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showHowToPlay, setShowHowToPlay] = useState<boolean>(false);
 
-  // New persistent custom server address handling for Serverless environments (like Vercel)
-  const [customWsUrl, setCustomWsUrl] = useState<string>(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const wsParam = urlParams.get('ws');
-    if (wsParam) {
-      localStorage.setItem('poker_ws_url', wsParam);
-      return wsParam;
-    }
-    return localStorage.getItem('poker_ws_url') || '';
-  });
-  const [tempWsUrl, setTempWsUrl] = useState<string>(customWsUrl);
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
   const [showServerConfig, setShowServerConfig] = useState<boolean>(false);
 
   const prevStateRef = useRef<RoomState | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
+  const p2pRef = useRef<P2PManager | null>(null);
 
-  // Failsafe auto-connecting WebSocket loop
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const defaultWsUrl = `${protocol}//${window.location.host}`;
-    const wsUrl = customWsUrl || defaultWsUrl;
+  const handleServerMessage = (rawMessage: ServerMessage) => {
+    try {
+      switch (rawMessage.type) {
+        case 'welcome':
+          break;
 
-    let reconnectTimeout: any = null;
+        case 'state_update': {
+          const nextState = rawMessage.payload.state;
+          const prev = prevStateRef.current;
 
-    const connectWS = () => {
-      setConnectionStatus('connecting');
-      const ws = new WebSocket(wsUrl);
-      socketRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('Multiplayer WS Channel connected.');
-        setConnectionStatus('connected');
-        setErrorMsg(null);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const rawMessage = JSON.parse(event.data) as ServerMessage;
-
-          switch (rawMessage.type) {
-            case 'welcome':
-              setPlayerId(rawMessage.payload.playerId);
-              break;
-
-            case 'state_update': {
-              const nextState = rawMessage.payload.state;
-              const prev = prevStateRef.current;
-
-              // Play synthesized sounds on structural poker changes
-              if (prev) {
-                // 1. New card dealt to board or hands
-                if (
-                  (nextState.communityCards.length !== prev.communityCards.length) ||
-                  (nextState.phase !== prev.phase && nextState.phase !== 'SHOWDOWN')
-                ) {
-                  playDealCard();
-                }
-
-                // 2. Pot size increases (chips added)
-                if (nextState.pot > prev.pot) {
-                  playChipClink();
-                }
-
-                // 3. Check / fold sound triggers by comparing sitting player actions
-                for (const pid in nextState.players) {
-                  const pPrev = prev.players[pid];
-                  const pNext = nextState.players[pid];
-                  if (pNext && (!pPrev || pNext.lastAction !== pPrev.lastAction)) {
-                    if (pNext.lastAction === 'Paso') {
-                      playCheckKnock();
-                    } else if (pNext.lastAction === 'No voy') {
-                      playFoldSigh();
-                    } else if (pNext.lastAction.includes('Iguala') || pNext.lastAction.includes('Ciega') || pNext.lastAction.includes('sube')) {
-                      playChipClink();
-                    }
-                  }
-                }
-
-                // 4. Showdown fanfare
-                if (nextState.phase === 'SHOWDOWN' && prev.phase !== 'SHOWDOWN') {
-                  playWinnerFanfare();
-                }
-              }
-
-              prevStateRef.current = nextState;
-              setRoomState(nextState);
-              break;
+          // Play synthesized sounds on structural poker changes
+          if (prev) {
+            // 1. New card dealt to board or hands
+            if (
+              (nextState.communityCards.length !== prev.communityCards.length) ||
+              (nextState.phase !== prev.phase && nextState.phase !== 'SHOWDOWN')
+            ) {
+              playDealCard();
             }
 
-            case 'chat_message':
-              setChatMessages((prev) => [...prev, rawMessage.payload]);
-              break;
+            // 2. Pot size increases (chips added)
+            if (nextState.pot > prev.pot) {
+              playChipClink();
+            }
 
-            case 'error':
-              if (rawMessage.payload.message !== 'pong') {
-                setErrorMsg(rawMessage.payload.message);
-                // Clear error automatically after 6 seconds
-                setTimeout(() => setErrorMsg(null), 6000);
+            // 3. Check / fold sound triggers by comparing sitting player actions
+            for (const pid in nextState.players) {
+              const pPrev = prev.players[pid];
+              const pNext = nextState.players[pid];
+              if (pNext && (!pPrev || pNext.lastAction !== pPrev.lastAction)) {
+                if (pNext.lastAction === 'Paso') {
+                  playCheckKnock();
+                } else if (pNext.lastAction === 'No voy') {
+                  playFoldSigh();
+                } else if (pNext.lastAction.includes('Iguala') || pNext.lastAction.includes('Ciega') || pNext.lastAction.includes('sube')) {
+                  playChipClink();
+                }
               }
-              break;
+            }
+
+            // 4. Showdown fanfare
+            if (nextState.phase === 'SHOWDOWN' && prev.phase !== 'SHOWDOWN') {
+              playWinnerFanfare();
+            }
           }
-        } catch (err) {
-          console.error('Error receiving multiplayer socket payload:', err);
+
+          prevStateRef.current = nextState;
+          setRoomState(nextState);
+          break;
         }
-      };
 
-      ws.onerror = (err) => {
-        console.error('WS Channel error:', err);
-        setConnectionStatus('disconnected');
-      };
+        case 'chat_message':
+          setChatMessages((prev) => [...prev, rawMessage.payload]);
+          break;
 
-      ws.onclose = () => {
-        console.warn('WS Channel disconnected. Scheduling retry...');
-        setConnectionStatus('disconnected');
-        // Retry connection in 3 seconds
-        reconnectTimeout = setTimeout(connectWS, 3000);
-      };
-
-      setSocket(ws);
-    };
-
-    connectWS();
-
-    // Setup an interval to ping the server to keep the Cloud Run socket warm
-    const pingInterval = setInterval(() => {
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: 'ping' }));
+        case 'error':
+          if (rawMessage.payload.message !== 'pong') {
+            setErrorMsg(rawMessage.payload.message);
+            // Clear error automatically after 6 seconds
+            setTimeout(() => setErrorMsg(null), 6000);
+          }
+          break;
       }
-    }, 25000);
+    } catch (err) {
+      console.error('Error processing P2P payload:', err);
+    }
+  };
 
+  useEffect(() => {
     return () => {
-      clearInterval(pingInterval);
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      socketRef.current?.close();
+      if (p2pRef.current) {
+        p2pRef.current.destroy();
+      }
     };
-  }, [customWsUrl]);
+  }, []);
 
   // Action emitters
   const emitMessage = (msg: ClientMessage) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(msg));
+    if (p2pRef.current) {
+      p2pRef.current.emit(msg);
     }
   };
 
   const handleCreateRoom = (name: string, sb: number, timer: number) => {
     setUsername(name);
-    emitMessage({
-      type: 'create_room',
-      payload: { name, smallBlind: sb, turnTimeout: timer }
+    if (p2pRef.current) {
+      p2pRef.current.destroy();
+    }
+    const mgr = new P2PManager(playerId, handleServerMessage, (status) => {
+      setConnectionStatus(status);
     });
+    p2pRef.current = mgr;
+    mgr.createRoom(name, sb, timer);
   };
 
   const handleJoinRoom = (name: string, code: string) => {
     setUsername(name);
-    emitMessage({
-      type: 'join_room',
-      payload: { name, roomCode: code }
+    if (p2pRef.current) {
+      p2pRef.current.destroy();
+    }
+    const mgr = new P2PManager(playerId, handleServerMessage, (status) => {
+      setConnectionStatus(status);
     });
+    p2pRef.current = mgr;
+    mgr.joinRoom(name, code);
   };
 
   const handleSitDown = (seatIndex: number, buyIn: number) => {
@@ -284,10 +242,9 @@ export default function App() {
         )}
 
         <div className="flex items-center gap-2">
-          {/* Connection Status & Config Button */}
+          {/* Connection Status & Info Button */}
           <button
             onClick={() => {
-              setTempWsUrl(customWsUrl);
               setShowServerConfig(true);
             }}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] uppercase tracking-wider font-extrabold rounded-xl border transition-all duration-300 pointer-events-auto cursor-pointer ${
@@ -295,18 +252,18 @@ export default function App() {
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
                 : connectionStatus === 'connecting'
                 ? 'bg-amber-400/10 text-amber-400 border-amber-400/20 animate-pulse hover:bg-amber-400/20'
-                : 'bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/20'
+                : 'bg-stone-500/10 text-stone-400 border-stone-500/20 hover:bg-stone-550/20'
             }`}
-            title="Configurar servidor de juego"
+            title="Detalles de la red P2P WebRTC"
           >
             <span className={`w-1.5 h-1.5 rounded-full ${
-              connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'
+              connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-stone-550'
             }`} />
             <span className="hidden sm:inline">
-              {connectionStatus === 'connected' ? 'Servidor Conectado' : connectionStatus === 'connecting' ? 'Conectando...' : 'Sin Conexión'}
+              {connectionStatus === 'connected' ? 'P2P Conectado' : connectionStatus === 'connecting' ? 'Iniciando P2P...' : 'P2P Inactivo'}
             </span>
             <span className="sm:hidden">
-              {connectionStatus === 'connected' ? 'OK' : connectionStatus === 'connecting' ? '...' : '!'}
+              {connectionStatus === 'connected' ? 'P2P' : connectionStatus === 'connecting' ? '...' : 'OFF'}
             </span>
             <Settings size={12} className="opacity-70 ml-0.5" />
           </button>
@@ -478,7 +435,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Server Config & Help Modal Overlay */}
+      {/* P2P Network Info & Help Modal Overlay */}
       <AnimatePresence>
         {showServerConfig && (
           <motion.div
@@ -491,82 +448,47 @@ export default function App() {
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl max-w-lg w-full shadow-2xl relative space-y-5 text-left font-sans"
+              className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl max-w-xl w-full shadow-2xl relative space-y-5 text-left font-sans"
             >
               <div className="flex items-center gap-2.5 text-emerald-400">
                 <Settings size={22} />
                 <h3 className="text-sm font-black uppercase tracking-widest text-[#10b981]">
-                  Configuración del Servidor de Juego
+                  Red Peer-to-Peer (WebRTC) Activa
                 </h3>
               </div>
 
               <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
-                <p className="bg-red-500/10 border border-red-500/20 p-3 rounded-lg text-red-200">
-                  ⚠️ <strong>Aviso sobre Despliegues Serverless:</strong> Has desplegado tu aplicación en <strong>Vercel</strong> (`poker-friends-theta.vercel.app`). Dado que Vercel es una plataforma Serverless sin soporte permanente para WebSockets activos, <strong>las conexiones de WebSocket directamente a Vercel fallarán</strong>.
+                <p className="bg-emerald-500/10 border border-emerald-500/20 p-3.5 rounded-xl text-emerald-200">
+                  🚀 <strong>¡Conexión Serverless 100% P2P Activada!</strong> Hemos migrado el juego a una arquitectura descentralizada de navegador a navegador usando <strong>WebRTC (PeerJS)</strong>.
                 </p>
-                <p>
-                  Para solucionarlo, puedes introducir a continuación la dirección de tu servidor dedicado (por ejemplo, tu despliegue continuo en <strong>Render, Railway, Fly.io o Cloud Run</strong>), o dejarlo vacío para usar la de autodetección por defecto.
-                </p>
-              </div>
 
-              {/* URL Editing Form */}
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-                  <Globe size={11} className="text-emerald-500" /> URL de WebSocket (ws/wss):
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ej: wss://tu-servidor-poker.onrender.com"
-                  value={tempWsUrl}
-                  onChange={(e) => setTempWsUrl(e.target.value.trim())}
-                  className="w-full bg-black/60 border border-white/10 focus:border-emerald-500 rounded-xl px-4 py-2.5 text-xs text-slate-100 outline-none transition placeholder-slate-600 font-mono text-white"
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTempWsUrl('');
-                      setCustomWsUrl('');
-                      localStorage.removeItem('poker_ws_url');
-                      setShowServerConfig(false);
-                    }}
-                    className="flex-1 py-2 bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white rounded-lg text-[10px] tracking-wider uppercase font-bold transition"
-                  >
-                    Auto-detección Local
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomWsUrl(tempWsUrl);
-                      localStorage.setItem('poker_ws_url', tempWsUrl);
-                      setShowServerConfig(false);
-                    }}
-                    className="flex-1 py-2 bg-[#059669] hover:bg-emerald-500 text-white rounded-lg text-[10px] tracking-wider uppercase font-bold transition"
-                  >
-                    Guardar y Conectar
-                  </button>
+                <div className="bg-white/5 border border-white/10 p-3.5 rounded-lg space-y-2 text-slate-350">
+                  <h4 className="font-bold text-emerald-400 uppercase text-[10px] tracking-wide">
+                    💡 ¿Cómo funciona esta tecnología?
+                  </h4>
+                  <p>
+                    Cuando creas una mesa, tu propio navegador se convierte en el <strong>Servidor Autoritativo</strong> del juego (baraja las cartas, reparte y procesa las ciegas y apuestas).
+                  </p>
+                  <p>
+                    Tus amigos se conectan de manera directa a ti compartiendo el <strong>Código de Sala</strong>. Todo el tráfico viaja cifrado de navegador a navegador, con cero latencia y sin depender de servidores dedicados de pago.
+                  </p>
+                </div>
+
+                <div className="bg-white/5 border border-white/10 p-3.5 rounded-lg space-y-1 text-slate-400">
+                  <p className="font-semibold text-slate-200">Ventajas clave:</p>
+                  <p>• <strong>Cero Servidores:</strong> No dependemos de servidores dedicados caros en la nube.</p>
+                  <p>• <strong>100% Gratuito y Libre:</strong> Despliega en Vercel, Netlify u hostings estáticos sin pagar backend.</p>
+                  <p>• <strong>Anti-Trampas Total:</strong> El anfitrión ofusca y oculta las cartas de los demás jugadores del tráfico WebRTC hasta el momento del Showdown.</p>
                 </div>
               </div>
 
-              {/* Quick instructions for deployment */}
-              <div className="pt-3 border-t border-white/5 space-y-2">
-                <h4 className="text-[10px] font-black uppercase text-amber-400 tracking-wider">
-                  ¿Cómo desplegar el Back-end de forma estable y gratuita?
-                </h4>
-                <div className="text-[11px] text-slate-400 space-y-1 leading-snug font-sans">
-                  <p>1. Importa tu repositorio en plataformas como <a href="https://render.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">Render</a> o <a href="https://railway.app" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline animate-pulse">Railway</a>.</p>
-                  <p>2. El sistema detectará los scripts de `package.json` de manera nativa.</p>
-                  <p>3. El build ejecutará `npm run build` y arrancará de forma estable en el puerto 3000 con soporte completo de WebSockets.</p>
-                </div>
-              </div>
-
-              <div className="flex justify-end pt-1">
+              <div className="flex justify-end pt-2 border-t border-white/5">
                 <button
                   type="button"
                   onClick={() => setShowServerConfig(false)}
-                  className="px-4 py-1.5 bg-white/5 hover:bg-white/10 text-slate-350 hover:text-white text-xs font-bold rounded-lg transition"
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition"
                 >
-                  Cerrar
+                  Entendido
                 </button>
               </div>
             </motion.div>
