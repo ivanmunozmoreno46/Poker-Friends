@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Copy, Check, Users, MessageSquare, LogOut, Code, Sparkles, HelpCircle } from 'lucide-react';
+import { Copy, Check, Users, MessageSquare, LogOut, Code, Sparkles, HelpCircle, Settings, Globe } from 'lucide-react';
 
 import { RoomState, ChatMessage, ClientMessage, ServerMessage, Player } from './types';
 import PokerTable from './components/PokerTable';
@@ -31,20 +31,39 @@ export default function App() {
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showHowToPlay, setShowHowToPlay] = useState<boolean>(false);
 
+  // New persistent custom server address handling for Serverless environments (like Vercel)
+  const [customWsUrl, setCustomWsUrl] = useState<string>(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const wsParam = urlParams.get('ws');
+    if (wsParam) {
+      localStorage.setItem('poker_ws_url', wsParam);
+      return wsParam;
+    }
+    return localStorage.getItem('poker_ws_url') || '';
+  });
+  const [tempWsUrl, setTempWsUrl] = useState<string>(customWsUrl);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [showServerConfig, setShowServerConfig] = useState<boolean>(false);
+
   const prevStateRef = useRef<RoomState | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   // Failsafe auto-connecting WebSocket loop
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    const defaultWsUrl = `${protocol}//${window.location.host}`;
+    const wsUrl = customWsUrl || defaultWsUrl;
+
+    let reconnectTimeout: any = null;
 
     const connectWS = () => {
+      setConnectionStatus('connecting');
       const ws = new WebSocket(wsUrl);
       socketRef.current = ws;
 
       ws.onopen = () => {
         console.log('Multiplayer WS Channel connected.');
+        setConnectionStatus('connected');
         setErrorMsg(null);
       };
 
@@ -119,10 +138,16 @@ export default function App() {
         }
       };
 
+      ws.onerror = (err) => {
+        console.error('WS Channel error:', err);
+        setConnectionStatus('disconnected');
+      };
+
       ws.onclose = () => {
         console.warn('WS Channel disconnected. Scheduling retry...');
+        setConnectionStatus('disconnected');
         // Retry connection in 3 seconds
-        setTimeout(connectWS, 3000);
+        reconnectTimeout = setTimeout(connectWS, 3000);
       };
 
       setSocket(ws);
@@ -139,9 +164,10 @@ export default function App() {
 
     return () => {
       clearInterval(pingInterval);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       socketRef.current?.close();
     };
-  }, []);
+  }, [customWsUrl]);
 
   // Action emitters
   const emitMessage = (msg: ClientMessage) => {
@@ -257,7 +283,34 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2">
+          {/* Connection Status & Config Button */}
+          <button
+            onClick={() => {
+              setTempWsUrl(customWsUrl);
+              setShowServerConfig(true);
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] uppercase tracking-wider font-extrabold rounded-xl border transition-all duration-300 pointer-events-auto cursor-pointer ${
+              connectionStatus === 'connected'
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20'
+                : connectionStatus === 'connecting'
+                ? 'bg-amber-400/10 text-amber-400 border-amber-400/20 animate-pulse hover:bg-amber-400/20'
+                : 'bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/20'
+            }`}
+            title="Configurar servidor de juego"
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${
+              connectionStatus === 'connected' ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-500'
+            }`} />
+            <span className="hidden sm:inline">
+              {connectionStatus === 'connected' ? 'Servidor Conectado' : connectionStatus === 'connecting' ? 'Conectando...' : 'Sin Conexión'}
+            </span>
+            <span className="sm:hidden">
+              {connectionStatus === 'connected' ? 'OK' : connectionStatus === 'connecting' ? '...' : '!'}
+            </span>
+            <Settings size={12} className="opacity-70 ml-0.5" />
+          </button>
+
           <button
             onClick={() => setShowHowToPlay(!showHowToPlay)}
             className="p-2 hover:bg-white/5 text-slate-400 hover:text-slate-250 border border-transparent hover:border-white/10 rounded-lg transition"
@@ -418,6 +471,102 @@ export default function App() {
                   className="px-4 py-2 bg-yellow-500 hover:bg-yellow-400 active:scale-95 text-slate-950 text-xs font-bold rounded-lg transition"
                 >
                   Cerrar Guía
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Server Config & Help Modal Overlay */}
+      <AnimatePresence>
+        {showServerConfig && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto"
+          >
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl max-w-lg w-full shadow-2xl relative space-y-5 text-left font-sans"
+            >
+              <div className="flex items-center gap-2.5 text-emerald-400">
+                <Settings size={22} />
+                <h3 className="text-sm font-black uppercase tracking-widest text-[#10b981]">
+                  Configuración del Servidor de Juego
+                </h3>
+              </div>
+
+              <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+                <p className="bg-red-500/10 border border-red-500/20 p-3 rounded-lg text-red-200">
+                  ⚠️ <strong>Aviso sobre Despliegues Serverless:</strong> Has desplegado tu aplicación en <strong>Vercel</strong> (`poker-friends-theta.vercel.app`). Dado que Vercel es una plataforma Serverless sin soporte permanente para WebSockets activos, <strong>las conexiones de WebSocket directamente a Vercel fallarán</strong>.
+                </p>
+                <p>
+                  Para solucionarlo, puedes introducir a continuación la dirección de tu servidor dedicado (por ejemplo, tu despliegue continuo en <strong>Render, Railway, Fly.io o Cloud Run</strong>), o dejarlo vacío para usar la de autodetección por defecto.
+                </p>
+              </div>
+
+              {/* URL Editing Form */}
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                  <Globe size={11} className="text-emerald-500" /> URL de WebSocket (ws/wss):
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ej: wss://tu-servidor-poker.onrender.com"
+                  value={tempWsUrl}
+                  onChange={(e) => setTempWsUrl(e.target.value.trim())}
+                  className="w-full bg-black/60 border border-white/10 focus:border-emerald-500 rounded-xl px-4 py-2.5 text-xs text-slate-100 outline-none transition placeholder-slate-600 font-mono text-white"
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTempWsUrl('');
+                      setCustomWsUrl('');
+                      localStorage.removeItem('poker_ws_url');
+                      setShowServerConfig(false);
+                    }}
+                    className="flex-1 py-2 bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white rounded-lg text-[10px] tracking-wider uppercase font-bold transition"
+                  >
+                    Auto-detección Local
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomWsUrl(tempWsUrl);
+                      localStorage.setItem('poker_ws_url', tempWsUrl);
+                      setShowServerConfig(false);
+                    }}
+                    className="flex-1 py-2 bg-[#059669] hover:bg-emerald-500 text-white rounded-lg text-[10px] tracking-wider uppercase font-bold transition"
+                  >
+                    Guardar y Conectar
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick instructions for deployment */}
+              <div className="pt-3 border-t border-white/5 space-y-2">
+                <h4 className="text-[10px] font-black uppercase text-amber-400 tracking-wider">
+                  ¿Cómo desplegar el Back-end de forma estable y gratuita?
+                </h4>
+                <div className="text-[11px] text-slate-400 space-y-1 leading-snug font-sans">
+                  <p>1. Importa tu repositorio en plataformas como <a href="https://render.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">Render</a> o <a href="https://railway.app" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline animate-pulse">Railway</a>.</p>
+                  <p>2. El sistema detectará los scripts de `package.json` de manera nativa.</p>
+                  <p>3. El build ejecutará `npm run build` y arrancará de forma estable en el puerto 3000 con soporte completo de WebSockets.</p>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowServerConfig(false)}
+                  className="px-4 py-1.5 bg-white/5 hover:bg-white/10 text-slate-350 hover:text-white text-xs font-bold rounded-lg transition"
+                >
+                  Cerrar
                 </button>
               </div>
             </motion.div>
