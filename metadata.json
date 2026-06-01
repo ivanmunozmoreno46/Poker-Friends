@@ -1,0 +1,6 @@
+{
+  "name": "Texas Holdem Poker",
+  "description": "Juego de poker Texas Hold'em en línea para jugar con amigos en salas privadas con chat de grupo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
